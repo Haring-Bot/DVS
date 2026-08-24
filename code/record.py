@@ -1,99 +1,125 @@
-#import depthai as dai
+import depthai as dai
 import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from multiprocessing import Event, get_context
 
 from metavision_hal import DeviceDiscovery
 
 
-def recordRGB(stamp):
-    folderPath = Path(__file__).resolve().parent.parent / "recordings" / stamp
-    output_file = folderPath / f"{stamp}_RGB.mp4"
+def recordRGB(stamp, stop_event):
+    folder_path = Path(__file__).resolve().parent.parent / "recordings" / stamp
+    output_file = folder_path / f"{stamp}_RGB.mp4"
 
     with dai.Pipeline() as pipeline:
-        # Graceful stop on Ctrl+C
-        def signal_handler(sig, frame):
-            print("\nStopping recording...")
-            pipeline.stop()
-        signal.signal(signal.SIGINT, signal_handler)
+        cam = pipeline.create(dai.node.Camera).build(
+            dai.CameraBoardSocket.CAM_A
+        )
 
-        # 1. Initialize Camera (CAM_A / RGB)
-        cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-
-        # 2. Create Video Encoder
-        videoEncoder = pipeline.create(dai.node.VideoEncoder).build(
+        encoder = pipeline.create(dai.node.VideoEncoder).build(
             cam.requestOutput((1280, 720), dai.ImgFrame.Type.NV12)
         )
-        videoEncoder.setProfile(dai.VideoEncoderProperties.Profile.H264_MAIN)
+        encoder.setProfile(dai.VideoEncoderProperties.Profile.H264_MAIN)
 
-        # 3. Create RecordVideo host node
         record = pipeline.create(dai.node.RecordVideo)
         record.setRecordVideoFile(str(output_file))
+        encoder.out.link(record.input)
 
-        # 4. Link Encoder output directly to RecordVideo
-        videoEncoder.out.link(record.input)
-
-        # 5. Start recording pipeline
         pipeline.start()
-        print("Recording started. Saving to '" + str(output_file) + "'. Press Ctrl+C to stop.")
-        
-        while pipeline.isRunning():
-            time.sleep(1)
-def record_genx320(output_file: Path):
-    # 1. Discover and open the Prophesee GenX320 camera
-    if DeviceDiscovery is None:
-        print("Error: Metavision SDK not available.")
-        sys.exit(1)
-    
+        print(f"RGB recording to: {output_file}")
+
+        try:
+            while not stop_event.is_set() and pipeline.isRunning():
+                time.sleep(0.1)
+        finally:
+            if pipeline.isRunning():
+                pipeline.stop()
+
+
+def recordDVS(output_file, stop_event):
     device = DeviceDiscovery.open("")
     if not device:
-        print("Error: Could not connect to Prophesee GenX320 camera.")
-        sys.exit(1)
+        raise RuntimeError("Could not connect to DVS camera")
 
-    # 2. Get access to the event stream
     raw_facility = device.get_i_events_stream()
     if not raw_facility:
-        print("Error: Could not access event stream facility.")
-        sys.exit(1)
+        raise RuntimeError("Could not access DVS event stream")
 
-    # 3. Start logging raw data to file
-    print(f"Starting GenX320 recording to: {output_file}")
+    print(f"DVS recording: {output_file}")
     raw_facility.start()
     raw_facility.log_raw_data(str(output_file))
 
-    # Handle Ctrl+C gracefully
-    recording = True
-    def signal_handler(sig, frame):
-        nonlocal recording
-        print("\nStopping GenX320 recording...")
-        recording = False
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # 4. Main recording loop
     try:
-        while recording:
+        while not stop_event.is_set():
             if raw_facility.poll_buffer():
                 raw_facility.get_latest_raw_data()
             time.sleep(0.001)
     finally:
-        # 5. Safely stop recording
         raw_facility.stop_log_raw_data()
         raw_facility.stop()
-        print("GenX320 recording saved successfully.")
 
 
 def main():
     stamp = datetime.now().strftime("%Y%m%d%H%M")
-    
-    # Save to DVS/recordings/YYYYMMDDHHMM/genx320.raw
     target_dir = Path(__file__).resolve().parent.parent / "recordings" / stamp
     target_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_raw = target_dir / "genx320.raw"
-    record_genx320(output_raw)
+
+    context = get_context("spawn")
+    stop_event = context.Event()
+
+    def handle_stop(sig, frame):
+        print("\nStopping both recordings...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, handle_stop)
+
+    dvs_process = context.Process(
+        target=recordDVS,
+        args=(target_dir / f"DVS_{stamp}.raw", stop_event),
+        name="DVS recorder",
+    )
+    rgb_process = context.Process(
+        target=recordRGB,
+        args=(stamp, stop_event),
+        name="RGB recorder",
+    )
+
+    dvs_process.start()
+    rgb_process.start()
+
+    print(f"Started DVS process: {dvs_process.pid}")
+    print(f"Started RGB process: {rgb_process.pid}")
+
+    try:
+        while dvs_process.is_alive() or rgb_process.is_alive():
+            dvs_process.join(timeout=0.5)
+            rgb_process.join(timeout=0.5)
+
+            if rgb_process.exitcode not in (None, 0):
+                print(f"RGB recorder exited with code {rgb_process.exitcode}")
+                stop_event.set()
+
+            if dvs_process.exitcode not in (None, 0):
+                print(f"DVS recorder exited with code {dvs_process.exitcode}")
+                stop_event.set()
+
+    except KeyboardInterrupt:
+        handle_stop(None, None)
+
+    finally:
+        stop_event.set()
+
+        for process in (dvs_process, rgb_process):
+            process.join(timeout=3)
+
+        for process in (dvs_process, rgb_process):
+            if process.is_alive():
+                print(f"Force-stopping {process.name}")
+                process.terminate()
+                process.join()
+
 
 if __name__ == "__main__":
     main()
