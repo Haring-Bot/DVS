@@ -13,6 +13,7 @@ from metavision_hal import DeviceDiscovery
 
 
 def recordRGB(stamp, stop_event):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     folder_path = Path(__file__).resolve().parent.parent / "recordings" / stamp
     output_file = folder_path / f"{stamp}_RGB.mp4"
 
@@ -49,6 +50,7 @@ def recordRGB(stamp, stop_event):
 
 
 def recordDVS(output_file, stop_event):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     device = DeviceDiscovery.open("")
     if not device:
         raise RuntimeError("Could not connect to DVS camera")
@@ -72,6 +74,7 @@ def recordDVS(output_file, stop_event):
 
 
 def recordLIDAR(output_folder, stop_event):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     output_folder = Path(output_folder)
 
     image_name = "ros2humble-livox:latest"
@@ -91,6 +94,8 @@ def recordLIDAR(output_folder, stop_event):
     host_target_dir = str(output_folder.parent.resolve())
     bag_folder_name = output_folder.name
     container_bag_path = f"/recordings/{bag_folder_name}"
+
+    metadata_path = output_folder / "metadata.yaml"
 
     container = dockerClient.containers.run(
         image=image_name,
@@ -121,7 +126,9 @@ def recordLIDAR(output_folder, stop_event):
             container_name,
             "bash",
             "-c",
-            f"source /root/ros2_ws/install/setup.bash && ros2 bag record /livox/lidar /livox/imu -o {container_bag_path}",
+            f"source /root/ros2_ws/install/setup.bash && "
+            f"ros2 bag record --storage sqlite3 "
+            f"/livox/lidar /livox/imu -o {container_bag_path}",
         ]
 
         print(f"LIDAR recording to: {output_folder}")
@@ -134,17 +141,26 @@ def recordLIDAR(output_folder, stop_event):
                 )
             time.sleep(0.2)
 
-        print("Stopping LIDAR bag recording...")
-        proc.terminate()
+        print("Stopping LIDAR bag recording gracefully...")
+        container.exec_run(
+            ["bash", "-lc", "pkill -INT -f '[r]os2 bag record'"]
+        )
+
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            print("Recorder did not stop cleanly; forcing termination.")
+            container.exec_run(
+                ["bash", "-lc", "pkill -TERM -f '[r]os2 bag record'"]
+            )
+            proc.wait(timeout=5)
+
+        print(f"ROS 2 bag finalized: {metadata_path}")
 
     finally:
         print("Stopping and removing LIDAR container...")
         try:
-            container.stop(timeout=2)
+            container.stop(timeout=10)
             container.remove()
         except Exception as e:
             print(f"Error during LIDAR container cleanup: {e}")
