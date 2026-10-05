@@ -2,3 +2,4 @@
 *.raw.tmp_index
 
 /recordings
+.venv/
