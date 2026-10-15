@@ -5,12 +5,35 @@ import time
 import docker
 import subprocess
 import os
+import json
 from datetime import datetime
 from pathlib import Path
 from multiprocessing import Event, get_context
 
 from metavision_hal import DeviceDiscovery
 
+def modifyJson(stamp, sensor, key, value):
+    path = Path(__file__).resolve().parent.parent / "recordings" / f"{stamp}/{stamp}.json"
+
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            data = json.load(f)
+    else:
+        print(f".json couldn't be found at {path}")
+        return
+    
+    if sensor == None:
+        data["experiment"][key]=value
+    elif sensor in ["RGB","DVS","LIDAR"]:
+        data["sensors"][sensor][key]=value
+    else:
+        print("sensor not found in list")
+        return
+
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
+
+    
 
 def recordRGB(stamp, stop_event):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -39,6 +62,11 @@ def recordRGB(stamp, stop_event):
         encoder.out.link(record.input)
 
         pipeline.start()
+        startPerf = time.perf_counter()
+
+        modifyJson(stamp, "RGB", "timestampStart", startPerf)
+        modifyJson(stamp, "RGB", "status", "started")
+        
         print(f"RGB recording to: {output_file}")
 
         try:
@@ -47,9 +75,12 @@ def recordRGB(stamp, stop_event):
         finally:
             if pipeline.isRunning():
                 pipeline.stop()
+                endPerf = time.perf_counter()
+                modifyJson(stamp, "RGB", "timestampStop", endPerf)
+                modifyJson(stamp, "RGB", "status", "stopped")
 
-
-def recordDVS(output_file, stop_event):
+               
+def recordDVS(stamp, output_file, stop_event):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     device = DeviceDiscovery.open("")
     if not device:
@@ -59,9 +90,15 @@ def recordDVS(output_file, stop_event):
     if not raw_facility:
         raise RuntimeError("Could not access DVS event stream")
 
-    print(f"DVS recording: {output_file}")
     raw_facility.start()
     raw_facility.log_raw_data(str(output_file))
+    
+    print(f"DVS recording: {output_file}")
+
+    startPerf = time.perf_counter()
+    modifyJson(stamp, "DVS", "timestampStart", startPerf)
+    modifyJson(stamp, "DVS", "status", "started")
+
 
     try:
         while not stop_event.is_set():
@@ -71,9 +108,11 @@ def recordDVS(output_file, stop_event):
     finally:
         raw_facility.stop_log_raw_data()
         raw_facility.stop()
+        endPerf = time.perf_counter()
+        modifyJson(stamp, "DVS", "timestampStop", endPerf)
+        modifyJson(stamp, "DVS", "status", "stopped")
 
-
-def recordLIDAR(output_folder, stop_event):
+def recordLIDAR(stamp, output_folder, stop_event):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     output_folder = Path(output_folder)
 
@@ -134,6 +173,10 @@ def recordLIDAR(output_folder, stop_event):
         print(f"LIDAR recording to: {output_folder}")
         proc = subprocess.Popen(record_cmd)
 
+        startPerf = time.perf_counter()
+        modifyJson(stamp, "LIDAR", "timestampStart", startPerf)
+        modifyJson(stamp, "LIDAR", "status", "started")
+
         while not stop_event.is_set():
             if proc.poll() is not None:
                 raise RuntimeError(
@@ -164,6 +207,9 @@ def recordLIDAR(output_folder, stop_event):
             container.remove()
         except Exception as e:
             print(f"Error during LIDAR container cleanup: {e}")
+        endPerf = time.perf_counter()
+        modifyJson(stamp, "LIDAR", "timestampStop", endPerf)
+        modifyJson(stamp, "LIDAR", "status", "stopped")
 
 
 def main():
@@ -180,9 +226,41 @@ def main():
 
     signal.signal(signal.SIGINT, handle_stop)
 
+    jsonFile = {
+        "experiment":{
+            "ID" : 0,
+            "status": "empty"
+        },
+        "sensors":{
+            "RGB":{
+                "status": "pending",
+                "timestampStart": None,
+                "timestampStop": None
+            },
+            "DVS":{
+                "status": "pending",
+                "timestampStart": None,
+                "timestampStop": None
+            },
+            "LIDAR":{
+                "status": "pending",
+                "timestampStart": None,
+                "timestampStop": None
+            }
+        }
+    }
+
+    jsonPath = f"{target_dir}/{stamp}.json"
+
+    with open(jsonPath, "w") as f:
+        json.dump(jsonFile, f, indent=4)
+
+    modifyJson(stamp, None, "ID", stamp)
+    modifyJson(stamp, None, "status", "started")
+
     dvs_process = context.Process(
         target=recordDVS,
-        args=(target_dir / f"{stamp}_DVS.raw", stop_event),
+        args=(stamp, target_dir / f"{stamp}_DVS.raw", stop_event),
         name="DVS recorder",
     )
     rgb_process = context.Process(
@@ -193,7 +271,7 @@ def main():
 
     lidar_process = context.Process(
         target=recordLIDAR,
-        args=(target_dir / f"{stamp}_LIDAR", stop_event),
+        args=(stamp, target_dir / f"{stamp}_LIDAR", stop_event),
         name="LIDAR recorder",
     )
 
@@ -204,6 +282,8 @@ def main():
     print(f"Started LIDAR process: {lidar_process.pid}")
     print(f"Started DVS process:   {dvs_process.pid}")
     print(f"Started RGB process:   {rgb_process.pid}")
+
+    modifyJson(stamp, None, "status", "started")
 
     try:
         while (
@@ -245,6 +325,8 @@ def main():
                 print(f"Force-stopping {process.name}")
                 process.terminate()
                 process.join()
+
+    modifyJson(stamp, None, "status", "finished")
 
 
 if __name__ == "__main__":
