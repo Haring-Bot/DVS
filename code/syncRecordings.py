@@ -4,10 +4,72 @@ import os
 import subprocess
 
 def cutVideos(rgbPath, dvsPath, startRGB, startDVS, stopRGB, stopDVS):
+    """ print(f"startRGB:{startRGB}")
+    print(f"stopRGB:{stopRGB}")
+    print(f"startDVS:{startDVS}")
+    print(f"stopDVS:{stopDVS}") """
+    globalStart = max(startRGB, startDVS)
+    globalStop = min(stopRGB, stopDVS)
+    globalDuration = globalStop - globalStart
+
+    startCutRGB = globalStart - startRGB
+    startCutDVS = globalStart - startDVS
+
+    stopCutRGB = startCutRGB + globalDuration
+    stopCutDVS = startCutDVS + globalDuration
+
+    
+    cutDVS(dvsPath, startCutDVS, stopCutDVS)
+    cutRGB(rgbPath, startCutRGB, stopCutRGB)
+    
     return None
 
-def cutDVS(dvsPath, startStamp, endStamp):
-    return False
+def cutRGB(rgbPath, startStamp, stopStamp):
+    root, ext = os.path.splitext(rgbPath)
+    outputPath = f"{root}_cut{ext}"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", rgbPath,
+        "-ss", str(startStamp),
+        "-to", str(stopStamp),
+        "-c", "copy",
+        outputPath
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Successfully saved trimmed RGB file to {outputPath}")
+    except subprocess.CalledProcessError as e:
+        print(f"RGB trimming failed: {e}")
+        raise
+
+    return outputPath
+
+def cutDVS(dvsPath, startStamp, stopStamp):
+    root, ext = os.path.splitext(dvsPath)
+    outputPath = f"{root}_cut{ext}"
+
+    """ print(f"start: {startStamp}")
+    print(f"stop: {stopStamp}") """
+    
+    cmd = [
+        "metavision_file_cutter",
+        "-i", dvsPath,
+        "-o", outputPath,
+        "-s", str(startStamp),
+        "-e", str(stopStamp)
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Successfully saved trimmed DVS file to {outputPath}")
+    except subprocess.CalledProcessError as e:
+        print(f"DVS trimming failed: {e}")
+        raise
+
+    return outputPath
 
 def main(path):
     recordingNum = os.path.basename(os.path.normpath(path))
