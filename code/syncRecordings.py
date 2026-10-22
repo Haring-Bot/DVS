@@ -19,24 +19,26 @@ def cutVideos(rgbPath, dvsPath, startRGB, startDVS, stopRGB, stopDVS):
     stopCutDVS = startCutDVS + globalDuration
 
     
-    cutDVS(dvsPath, startCutDVS, stopCutDVS)
-    cutRGB(rgbPath, startCutRGB, stopCutRGB)
+    cutRGBPath = cutRGB(rgbPath, startCutRGB, stopCutRGB)
+    cutDVSPath = cutDVS(dvsPath, startCutDVS, stopCutDVS)
     
-    return None
+    return cutRGBPath, cutDVSPath
 
 def cutRGB(rgbPath, startStamp, stopStamp):
     root, ext = os.path.splitext(rgbPath)
     outputPath = f"{root}_cut{ext}"
 
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", rgbPath,
-        "-ss", str(startStamp),
-        "-to", str(stopStamp),
-        "-c", "copy",
-        outputPath
-    ]
+            "ffmpeg",
+            "-y",
+            "-i", rgbPath,
+            "-ss", str(startStamp),          # Output seeking (frame-accurate)
+            "-t", str(stopStamp-startStamp),             # Exact duration
+            "-c:v", "libx264",               # Re-encode video for precision
+            "-preset", "ultrafast",          # Fast re-encoding on Raspberry Pi
+            "-avoid_negative_ts", "make_zero", # Fixes timestamp shift issues
+            outputPath
+        ]
 
     try:
         subprocess.run(cmd, check=True)
@@ -71,6 +73,26 @@ def cutDVS(dvsPath, startStamp, stopStamp):
 
     return outputPath
 
+def RawToAvi(path):
+    root, ext = os.path.splitext(path)
+    outputPath = f"{root}.avi"
+
+    cmd = [
+        "metavision_file_to_video",
+        "-i", path,
+        "-o", outputPath
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        print("Successfully transformed .raw to .avi file")
+    except subprocess.CalledProcessError as e:
+        print(f".raw to .avi transformation failed: {e}")
+        raise
+
+    return outputPath
+
+
 def main(path):
     recordingNum = os.path.basename(os.path.normpath(path))
 
@@ -88,7 +110,8 @@ def main(path):
             rgbFile = os.path.join(path, f"{stamp}_RGB.mp4")
             dvsFile = os.path.join(path, f"{stamp}_DVS.raw")
 
-            cutVideos(rgbFile, dvsFile, rgbStart, dvsStart, rgbStop, dvsStop)
+            cutRGBPath, cutDVSPath = cutVideos(rgbFile, dvsFile, rgbStart, dvsStart, rgbStop, dvsStop)
+            aviPath = RawToAvi(cutDVSPath)
 
             if data["sensors"]["LIDAR"]["status"] == "stopped":
                 print("LIDAR data detected. Starting to create map")

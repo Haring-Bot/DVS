@@ -36,6 +36,7 @@ def modifyJson(stamp, sensor, key, value):
     
 
 def recordRGB(stamp, stop_event):
+    fps = 30
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     folder_path = Path(__file__).resolve().parent.parent / "recordings" / stamp
     output_file = folder_path / f"{stamp}_RGB.mp4"
@@ -43,42 +44,76 @@ def recordRGB(stamp, stop_event):
     with dai.Pipeline() as pipeline:
         cam = pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_A,
-            sensorResolution=(3840, 2160),
-            sensorFps=15,
+            sensorResolution=(1920, 1080),
+            sensorFps=fps,
         )
 
         encoder = pipeline.create(dai.node.VideoEncoder).build(
             cam.requestOutput(
-                (3840, 2160),
+                (1920, 1080),
                 dai.ImgFrame.Type.NV12,
-                fps=15,
+                fps=fps,
             )
         )
-        encoder.setProfile(dai.VideoEncoderProperties.Profile.H264_MAIN)
         encoder.setBitrateKbps(12000)
-
-        record = pipeline.create(dai.node.RecordVideo)
-        record.setRecordVideoFile(str(output_file))
-        encoder.out.link(record.input)
+        encoder.setDefaultProfilePreset(
+            fps,
+            dai.VideoEncoderProperties.Profile.H264_MAIN,
+        )
+        video_queue = encoder.out.createOutputQueue(maxSize=60, blocking=True)
 
         pipeline.start()
-        startPerf = time.perf_counter()
+        try:
+            command = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "h264",
+                "-r",
+                str(fps),
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(output_file),
+            ]
+            muxer = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as error:
+            pipeline.stop()
+            raise RuntimeError("Could not start FFmpeg for RGB recording") from error
 
-        modifyJson(stamp, "RGB", "timestampStart", startPerf)
+        if muxer.stdin is None:
+            pipeline.stop()
+            muxer.kill()
+            raise RuntimeError("FFmpeg RGB input pipe was not created")
+
+        start_perf = time.time()
+
+        modifyJson(stamp, "RGB", "timestampStart", start_perf)
         modifyJson(stamp, "RGB", "status", "started")
-        
         print(f"RGB recording to: {output_file}")
 
         try:
             while not stop_event.is_set() and pipeline.isRunning():
-                time.sleep(0.1)
+                packet = video_queue.get()
+                muxer.stdin.write(packet.getData())
         finally:
             if pipeline.isRunning():
                 pipeline.stop()
-                endPerf = time.perf_counter()
-                modifyJson(stamp, "RGB", "timestampStop", endPerf)
-                modifyJson(stamp, "RGB", "status", "stopped")
-
+            muxer.stdin.close()
+            if muxer.wait() != 0:
+                raise RuntimeError(
+                    f"FFmpeg failed while writing RGB recording (exit code {muxer.returncode})"
+                )
+            end_perf = time.time()
+            modifyJson(stamp, "RGB", "timestampStop", end_perf)
+            modifyJson(stamp, "RGB", "status", "stopped")
                
 def recordDVS(stamp, output_file, stop_event):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -95,7 +130,15 @@ def recordDVS(stamp, output_file, stop_event):
     
     print(f"DVS recording: {output_file}")
 
-    startPerf = time.perf_counter()
+    first_packet_received = False
+    while not stop_event.is_set() and not first_packet_received:
+        if raw_facility.poll_buffer():
+            raw_facility.get_latest_raw_data()
+            first_packet_received = True
+        else:
+            time.sleep(0.001)
+
+    startPerf = time.time()
     modifyJson(stamp, "DVS", "timestampStart", startPerf)
     modifyJson(stamp, "DVS", "status", "started")
 
@@ -108,7 +151,7 @@ def recordDVS(stamp, output_file, stop_event):
     finally:
         raw_facility.stop_log_raw_data()
         raw_facility.stop()
-        endPerf = time.perf_counter()
+        endPerf = time.time()
         modifyJson(stamp, "DVS", "timestampStop", endPerf)
         modifyJson(stamp, "DVS", "status", "stopped")
 
@@ -173,7 +216,7 @@ def recordLIDAR(stamp, output_folder, stop_event):
         print(f"LIDAR recording to: {output_folder}")
         proc = subprocess.Popen(record_cmd)
 
-        startPerf = time.perf_counter()
+        startPerf = time.time()
         modifyJson(stamp, "LIDAR", "timestampStart", startPerf)
         modifyJson(stamp, "LIDAR", "status", "started")
 
@@ -207,7 +250,7 @@ def recordLIDAR(stamp, output_folder, stop_event):
             container.remove()
         except Exception as e:
             print(f"Error during LIDAR container cleanup: {e}")
-        endPerf = time.perf_counter()
+        endPerf = time.time()
         modifyJson(stamp, "LIDAR", "timestampStop", endPerf)
         modifyJson(stamp, "LIDAR", "status", "stopped")
 
@@ -285,6 +328,8 @@ def main():
 
     modifyJson(stamp, None, "status", "started")
 
+    reported_failures = set()
+
     try:
         while (
             dvs_process.is_alive()
@@ -295,18 +340,30 @@ def main():
             dvs_process.join(timeout=0.5)
             rgb_process.join(timeout=0.5)
 
-            if lidar_process.exitcode not in (None, 0):
+            if (
+                lidar_process.exitcode not in (None, 0)
+                and lidar_process.name not in reported_failures
+            ):
                 print(
                     f"LIDAR recorder exited with code {lidar_process.exitcode}"
                 )
+                reported_failures.add(lidar_process.name)
                 stop_event.set()
 
-            if rgb_process.exitcode not in (None, 0):
+            if (
+                rgb_process.exitcode not in (None, 0)
+                and rgb_process.name not in reported_failures
+            ):
                 print(f"RGB recorder exited with code {rgb_process.exitcode}")
+                reported_failures.add(rgb_process.name)
                 stop_event.set()
 
-            if dvs_process.exitcode not in (None, 0):
+            if (
+                dvs_process.exitcode not in (None, 0)
+                and dvs_process.name not in reported_failures
+            ):
                 print(f"DVS recorder exited with code {dvs_process.exitcode}")
+                reported_failures.add(dvs_process.name)
                 stop_event.set()
 
     except KeyboardInterrupt:
