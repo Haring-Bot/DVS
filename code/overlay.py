@@ -37,8 +37,25 @@ def CSV2NP(csvFile):
     )
     return npArray
 
-def events2buckets(events):
-    buckets = ()
+def events2buckets(events, fps):
+    buckets = []
+    bucketsize = 1000000 / fps
+    timestampsArray = events["t"]
+    firstTimeframe = timestampsArray[0]
+    lastTimeframe = timestampsArray[-1]
+
+    currentTimeframe = firstTimeframe
+
+    while currentTimeframe < lastTimeframe:
+        nextTimeframe = currentTimeframe + bucketsize
+        startFrame = np.searchsorted(timestampsArray, currentTimeframe, side="left")
+        endFrame = np.searchsorted(timestampsArray, nextTimeframe, side="left")
+
+        bucket = events[startFrame:endFrame]
+        buckets.append(bucket)
+        currentTimeframe = nextTimeframe
+
+    print(f"Split eventStream into {len(buckets)} frames with size {bucketsize}ms at {fps}fps")
     return buckets
 
 def main(path):
@@ -48,7 +65,7 @@ def main(path):
     csvFilePath = raw2CSV(rawFilePath)
     events = CSV2NP(csvFilePath)
 
-    print(events[1]["t"])
+    buckets = events2buckets(events, 30)
 
     return
 
