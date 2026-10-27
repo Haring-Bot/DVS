@@ -55,17 +55,39 @@ def events2buckets(events, fps):
         buckets.append(bucket)
         currentTimeframe = nextTimeframe
 
-    print(f"Split eventStream into {len(buckets)} frames with size {bucketsize}ms at {fps}fps")
+    print(f"Split eventStream into {len(buckets)} frames with size {bucketsize/1000:.2f}ms at {fps}fps")
     return buckets
+
+def buckets2images(buckets, xRes, yRes):
+    amountFrames = len(buckets)
+    images = np.zeros((amountFrames, yRes, xRes), dtype=np.int8)
+
+    for imageN, bucket in enumerate(buckets):
+        for event in bucket:
+            images[imageN, int(event["y"]), int(event["x"])] = event["p"]
+    print(f"Successfully created {len(images)} images!")
+
+    return images
 
 def main(path):
     recordingNum = os.path.basename(os.path.normpath(path))
     rawFilePath = f"{path}/{recordingNum}_DVS_cut.raw"
+    dvsImagesPath = f"{path}/{recordingNum}_DVS_images.npy"
 
-    csvFilePath = raw2CSV(rawFilePath)
-    events = CSV2NP(csvFilePath)
+    if Path(dvsImagesPath).is_file():
+        print("Saved images found. Continuing with overlay")
+        images = np.load(dvsImagesPath, allow_pickle=False)
+    else:
+        print(f"No saved images found. Creating from {rawFilePath}.")
+        csvFilePath = raw2CSV(rawFilePath)
+        events = CSV2NP(csvFilePath)
 
-    buckets = events2buckets(events, 30)
+        buckets = events2buckets(events, 30)
+        images = buckets2images(buckets, 320, 320)
+        np.save(dvsImagesPath, images)
+        print(f"Images saved to {dvsImagesPath}")
+
+
 
     return
 
