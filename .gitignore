@@ -1,5 +1,6 @@
 *.raw
 *.raw.tmp_index
+*.avi
 
 /recordings
 .venv/
