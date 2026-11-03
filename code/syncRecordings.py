@@ -92,6 +92,9 @@ def RawToAvi(path):
 
     return outputPath
 
+def applyTransformation():
+    return result
+
 
 def main(path):
     recordingNum = os.path.basename(os.path.normpath(path))
